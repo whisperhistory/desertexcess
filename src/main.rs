@@ -71,12 +71,15 @@ fn main() {
 			_ => continue, // ignoring, should probably log error
 		};
 
-		if let Ok(account) = ret {
-			let output: OutputLine = account.into();
-			writer.serialize(output).expect("writing to stdout failed");
-		} else {
+		if let Err(_err) = ret {
 			// handle error on ret, but spec says we should ignore errors, can't log either
 			// perhaps log to stderr would be ok here
 		}
+	}
+
+	// Print all account summaries
+	for account in store.list_accounts() {
+		let output: OutputLine = account.into();
+		writer.serialize(output).expect("writing to stdout failed");
 	}
 }

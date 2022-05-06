@@ -150,6 +150,10 @@ impl Store {
 		self.accounts.entry(id).or_insert_with(|| Account::new(id))
 	}
 
+	pub fn list_accounts(&self) -> impl Iterator<Item = AccountSummary> + '_ {
+		self.accounts.values().map(|a| a.summary())
+	}
+
 	fn get_tx(&mut self, txid: TxId) -> Result<&mut Tx, Error> {
 		self.history.get_mut(&txid).ok_or_else(|| Error::TxNotFound {
 			txid: txid,
@@ -161,13 +165,12 @@ impl Store {
 		txid: TxId,
 		client: ClientId,
 		amount: Decimal,
-	) -> Result<AccountSummary, Error> {
+	) -> Result<(), Error> {
 		assert!(amount.is_sign_positive());
-		let ret = {
+		{
 			let account = self.get_account(client);
 			account.available += amount;
-			account.summary()
-		};
+		}
 
 		self.history.insert(txid, Tx {
 			txid: txid,
@@ -176,7 +179,7 @@ impl Store {
 			amount: amount,
 			dispute_state: DisputeState::Normal,
 		});
-		Ok(ret)
+		Ok(())
 	}
 
 	pub fn handle_withdrawal(
@@ -184,14 +187,13 @@ impl Store {
 		txid: TxId,
 		client: ClientId,
 		amount: Decimal,
-	) -> Result<AccountSummary, Error> {
+	) -> Result<(), Error> {
 		assert!(amount.is_sign_positive());
-		let ret = {
+		{
 			let account = self.get_account(client);
 			account.need(amount)?;
 			account.available -= amount;
-			account.summary()
-		};
+		}
 
 		self.history.insert(txid, Tx {
 			txid: txid,
@@ -200,14 +202,14 @@ impl Store {
 			amount: amount,
 			dispute_state: DisputeState::Normal,
 		});
-		Ok(ret)
+		Ok(())
 	}
 
 	pub fn handle_dispute(
 		&mut self,
 		client: ClientId,
 		txid: TxId,
-	) -> Result<AccountSummary, Error> {
+	) -> Result<(), Error> {
 		let amount = {
 			let tx = self.get_tx(txid)?;
 			if tx.dispute_state != DisputeState::Normal {
@@ -234,14 +236,14 @@ impl Store {
 		account.need(amount)?;
 		account.available -= amount;
 		account.held += amount;
-		Ok(account.summary())
+		Ok(())
 	}
 
 	pub fn handle_resolve(
 		&mut self,
 		client: ClientId,
 		txid: TxId,
-	) -> Result<AccountSummary, Error> {
+	) -> Result<(), Error> {
 		let amount = {
 			let tx = self.get_tx(txid)?;
 			if tx.dispute_state != DisputeState::Disputed {
@@ -257,14 +259,14 @@ impl Store {
 		assert!(account.held >= amount);
 		account.available += amount;
 		account.held -= amount;
-		Ok(account.summary())
+		Ok(())
 	}
 
 	pub fn handle_chargeback(
 		&mut self,
 		client: ClientId,
 		txid: TxId,
-	) -> Result<AccountSummary, Error> {
+	) -> Result<(), Error> {
 		let amount = {
 			let tx = self.get_tx(txid)?;
 			if tx.dispute_state != DisputeState::Disputed {
@@ -280,7 +282,7 @@ impl Store {
 		assert!(account.held >= amount);
 		account.held -= amount;
 		account.locked = true;
-		Ok(account.summary())
+		Ok(())
 	}
 }
 
@@ -297,13 +299,16 @@ mod test {
 	#[test]
 	fn simple_test() {
 		let mut store = Store::new();
-		let mut txid = 0;
+		let mut txid = 0; // an incrementing txid counter
+
+		// The account ID we will use for our test user.
+		const ACC: u16 = 100;
 
 		// do a deposit
 		txid += 1;
-		let ret = store.handle_deposit(txid, 100, d("5.12345")).unwrap();
-		assert_eq!(ret, AccountSummary {
-			client: 100,
+		store.handle_deposit(txid, ACC, d("5.12345")).unwrap();
+		assert_eq!(store.get_account(ACC).summary(), AccountSummary {
+			client: ACC,
 			available: d("5.12345"),
 			held: d("0"),
 			total: d("5.12345"),
@@ -311,14 +316,14 @@ mod test {
 		});
 
 		// withdraw too much
-		let ret = store.handle_withdrawal(txid, 100, d("6")).unwrap_err();
+		let ret = store.handle_withdrawal(txid, ACC, d("6")).unwrap_err();
 		assert_eq!(ret, Error::InsufficientFunds { available: d("5.12345"), required: d("6") });
 
 		// do a withdrawal
 		txid += 1;
-		let ret = store.handle_withdrawal(txid, 100, d("4.01")).unwrap();
-		assert_eq!(ret, AccountSummary {
-			client: 100,
+		store.handle_withdrawal(txid, ACC, d("4.01")).unwrap();
+		assert_eq!(store.get_account(ACC).summary(), AccountSummary {
+			client: ACC,
 			available: d("1.11345"),
 			held: d("0"),
 			total: d("1.11345"),
@@ -327,9 +332,9 @@ mod test {
 
 		// do another deposit
 		txid += 1;
-		let ret = store.handle_deposit(txid, 100, d("3")).unwrap();
-		assert_eq!(ret, AccountSummary {
-			client: 100,
+		store.handle_deposit(txid, ACC, d("3")).unwrap();
+		assert_eq!(store.get_account(ACC).summary(), AccountSummary {
+			client: ACC,
 			available: d("4.11345"),
 			held: d("0"),
 			total: d("4.11345"),
@@ -338,12 +343,12 @@ mod test {
 		let deposit_txid = txid;
 
 		// dispute a non-existing tx
-		assert_eq!(store.handle_dispute(100, 7).unwrap_err(), Error::TxNotFound { txid: 7 });
+		assert_eq!(store.handle_dispute(ACC, 7).unwrap_err(), Error::TxNotFound { txid: 7 });
 
 		// dispute it
-		let ret = store.handle_dispute(100, deposit_txid).unwrap();
-		assert_eq!(ret, AccountSummary {
-			client: 100,
+		store.handle_dispute(ACC, deposit_txid).unwrap();
+		assert_eq!(store.get_account(ACC).summary(), AccountSummary {
+			client: ACC,
 			available: d("1.11345"),
 			held: d("3"),
 			total: d("4.11345"),
@@ -351,7 +356,7 @@ mod test {
 		});
 
 		// dispute it again
-		let ret = store.handle_dispute(100, deposit_txid).unwrap_err();
+		let ret = store.handle_dispute(ACC, deposit_txid).unwrap_err();
 		assert_eq!(ret, Error::TxInWrongState {
 			txid: deposit_txid,
 			action: TxType::Dispute,
@@ -359,9 +364,9 @@ mod test {
 		});
 
 		// resolve it
-		let ret = store.handle_resolve(100, deposit_txid).unwrap();
-		assert_eq!(ret, AccountSummary {
-			client: 100,
+		store.handle_resolve(ACC, deposit_txid).unwrap();
+		assert_eq!(store.get_account(ACC).summary(), AccountSummary {
+			client: ACC,
 			available: d("4.11345"),
 			held: d("0"),
 			total: d("4.11345"),
@@ -369,21 +374,22 @@ mod test {
 		});
 
 		// dispute it again
-		let ret = store.handle_dispute(100, deposit_txid).unwrap_err();
+		let ret = store.handle_dispute(ACC, deposit_txid).unwrap_err();
 		assert_eq!(ret, Error::TxInWrongState {
 			txid: deposit_txid,
 			action: TxType::Dispute,
 			state: DisputeState::Resolved,
 		});
 		// resolve it again
-		let ret = store.handle_resolve(100, deposit_txid).unwrap_err();
+		let ret = store.handle_resolve(ACC, deposit_txid).unwrap_err();
 		assert_eq!(ret, Error::TxInWrongState {
 			txid: deposit_txid,
 			action: TxType::Resolve,
 			state: DisputeState::Resolved,
 		});
+
 		// chargeback it
-		let ret = store.handle_chargeback(100, deposit_txid).unwrap_err();
+		let ret = store.handle_chargeback(ACC, deposit_txid).unwrap_err();
 		assert_eq!(ret, Error::TxInWrongState {
 			txid: deposit_txid,
 			action: TxType::Chargeback,
@@ -392,9 +398,9 @@ mod test {
 
 		// do another deposit
 		txid += 1;
-		let ret = store.handle_deposit(txid, 100, d("9")).unwrap();
-		assert_eq!(ret, AccountSummary {
-			client: 100,
+		store.handle_deposit(txid, ACC, d("9")).unwrap();
+		assert_eq!(store.get_account(ACC).summary(), AccountSummary {
+			client: ACC,
 			available: d("13.11345"),
 			held: d("0"),
 			total: d("13.11345"),
@@ -403,9 +409,9 @@ mod test {
 		let deposit_txid = txid;
 
 		// dispute it
-		let ret = store.handle_dispute(100, deposit_txid).unwrap();
-		assert_eq!(ret, AccountSummary {
-			client: 100,
+		store.handle_dispute(ACC, deposit_txid).unwrap();
+		assert_eq!(store.get_account(ACC).summary(), AccountSummary {
+			client: ACC,
 			available: d("4.11345"),
 			held: d("9"),
 			total: d("13.11345"),
@@ -413,9 +419,9 @@ mod test {
 		});
 
 		// charge it back
-		let ret = store.handle_chargeback(100, deposit_txid).unwrap();
-		assert_eq!(ret, AccountSummary {
-			client: 100,
+		store.handle_chargeback(ACC, deposit_txid).unwrap();
+		assert_eq!(store.get_account(ACC).summary(), AccountSummary {
+			client: ACC,
 			available: d("4.11345"),
 			held: d("0"),
 			total: d("4.11345"),
@@ -423,7 +429,7 @@ mod test {
 		});
 
 		// charge it back again
-		let ret = store.handle_chargeback(100, deposit_txid).unwrap_err();
+		let ret = store.handle_chargeback(ACC, deposit_txid).unwrap_err();
 		assert_eq!(ret, Error::TxInWrongState {
 			txid: deposit_txid,
 			action: TxType::Chargeback,
